@@ -3,7 +3,7 @@
 
 from wifi import radio, Monitor
 import ipaddress
-from time import sleep
+from time import sleep, monotonic
 from adafruit_connection_manager import get_radio_socketpool
 from adafruit_httpserver import Server, Request, Response, POST, GET
 import board
@@ -12,8 +12,12 @@ import servo
 import digitalio
 from analogio import AnalogIn
 
-center = 98 #Servo center angle
-turnAngle = 12 # Degrees to turn on turn command
+center = 99 #Servo center angle
+turnAngle = 10 # Degrees to turn on turn command
+POWER = 1 # 0-1 Caps total motor power
+actualPower = 0
+targetPower = 0
+updateTime = monotonic()
 
 led = digitalio.DigitalInOut(board.LED) # LED
 led.direction = digitalio.Direction.OUTPUT
@@ -25,7 +29,7 @@ my_servo = servo.Servo(pwm3)
 my_servo.angle = center
 sleep(.5)
 
-radio.connect("YOUR_WIFI_SSID_HERE","YOUR_WIFI_PASSWORD_HERE")
+radio.connect("YOUR_SSID_HERE","YOUR_PASSWORD_HERE")
 pool = get_radio_socketpool(radio)
 server = Server(pool, "/static", debug=True)
 
@@ -89,25 +93,33 @@ def webpage():
        width:150px;
        height:225px;
        z-index: 2;
-       background: rgb(247, 247, 25); 
+       background: rgb(247, 247, 25);
+       -webkit-touch-callout: none;
+       user-select: none;
        }}
        .rightButton {{
        width:150px;
        height:225px;
        z-index: 2;
-       background: lightskyblue; 
+       background: lightskyblue;
+       -webkit-touch-callout: none;
+       user-select: none;
        }}
        .fwdButton {{
        width:250px;
        height:120px;
        z-index: 2;
-       background: greenyellow; 
+       background: greenyellow;
+       -webkit-touch-callout: none;
+       user-select: none;
        }}
        .revButton {{
        width:250px;
        height:120px;
        z-index: 2;
-       background: red; 
+       background: red;
+       -webkit-touch-callout: none;
+       user-select: none;
        }}
 
 
@@ -170,21 +182,23 @@ def base(request: Request):  # pylint: disable=unused-argument
 #  if a button is pressed on the site
 @server.route("/", POST)
 def buttonpress(request: Request):#  get the raw text
-    
+    global targetPower, actualPower, POWER
     raw_text = request.raw_request.decode("utf8") # Decode the data into text
     print(f"\nRAW TEXT:\n{raw_text}\nEND")
     if "FORWARD" in raw_text:
       print("Forward")
-      pwm.duty_cycle = (0)
-      pwm2.duty_cycle = (2 ** 16)-1 # Motor forward
+      targetPower = 1*POWER
+
     if "BACKWARD" in raw_text:
       print("Backward")
-      pwm.duty_cycle = (2 ** 16)-1 # Motor backward
-      pwm2.duty_cycle = (0)
+      targetPower = -1*POWER
+
     if "STOP" in raw_text:
       print("Stop")
-      pwm.duty_cycle = (0) # Motor coast
-      pwm2.duty_cycle = (0)
+      targetPower = 0
+      pwm.duty_cycle = (2 ** 15) # Motor coast
+      pwm2.duty_cycle = (2 ** 15)
+
     if "LEFT" in raw_text: # Turn left
       print("Left")
       my_servo.angle = center - turnAngle
@@ -195,7 +209,6 @@ def buttonpress(request: Request):#  get the raw text
       print("Straight")
       my_servo.angle = center
     
-
     return Response(request, f"{webpage()}", content_type='text/html')#  reload site
 
 
@@ -210,4 +223,29 @@ print("serving:")
 server.start(str(radio.ipv4_address)) # This will print out the url of the web server
 
 while True: # We must constantly poll the server to see if there are any responses
-    server.poll()
+  server.poll()
+
+  if targetPower > 0 and (monotonic() - updateTime) > .05: # forward power
+    print(f"target: {targetPower} \nactual: {actualPower}")
+    actualPower += targetPower/12 # Breaks movemnt into steps
+    if actualPower > targetPower:
+      actualPower = targetPower
+    pwm.duty_cycle = (0)
+    pwm2.duty_cycle = int((2 ** 15) + (2 ** 15)*actualPower -1) # Motor forward
+    updateTime = monotonic()
+
+  elif targetPower < 0 and (monotonic() - updateTime) > .05: # reverse power
+    print(f"target: {targetPower} \nactual: {actualPower}")
+    actualPower -= targetPower/12 # Breaks movemnt into steps
+    if actualPower > (-1)*targetPower:
+      actualPower = (-1)*targetPower
+    pwm2.duty_cycle = (0)
+    pwm.duty_cycle = int((2 ** 15) + (2 ** 15)*actualPower -1) # Motor reverse
+    updateTime = monotonic()
+
+  elif targetPower == 0 and (monotonic() - updateTime) > .125 and actualPower > 0: # Allows you to "coast" so that the power doesn't reset to 0 each time you blip the throttle
+    actualPower -= .1
+    print(actualPower)
+    if actualPower < 0:
+      actualPower = 0
+    updateTime = monotonic()
